@@ -1,34 +1,37 @@
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import numpy as np
-import gc
 
-def display_frames_dynamic(frame_generator, width=256, height=240, pause_time=0.001):
+def animate_images(images, interval=100, save_path=None):
     """
-    Dynamically displays frames from a generator in a pyplot figure.
-
-    Each frame overwrites the previous frame. Frames are discarded after displaying
-    to keep memory usage constant. Uses a stable update loop suitable for long-running streams.
-
+    Animate a list of images using FuncAnimation
+    
     Parameters:
-        frame_generator: Generator yielding RGB frames of shape (height, width, 3)
-        width (int): Width of each frame in pixels
-        height (int): Height of each frame in pixels
-        pause_time (float): Time in seconds to pause per frame (default 0.001)
+    - images: list of numpy arrays (H, W, 3) or (H, W)
+    - interval: delay between frames in milliseconds
+    - save_path: if provided, save animation to this path
     """
-    plt.ion()  # enable interactive mode
     fig, ax = plt.subplots()
-    img_display = ax.imshow(np.zeros((height, width, 3), dtype=np.uint8))
     ax.axis('off')
-    fig.show()
-
-    try:
-        for frame in frame_generator:
-            img_display.set_data(frame)        # overwrite previous frame
-            fig.canvas.draw_idle()             # lightweight redraw
-            plt.pause(pause_time)              # process GUI events
-
-            del frame                          # discard frame
-            gc.collect()                       # free memory
-    finally:
-        plt.close(fig)
-
+    
+    # Display first image
+    if len(images[0].shape) == 3:
+        img_display = ax.imshow(images[0])
+    else:
+        img_display = ax.imshow(images[0], cmap='gray')
+    
+    def update(frame):
+        img_display.set_array(images[frame])
+        return [img_display]
+    
+    anim = animation.FuncAnimation(
+        fig, update, frames=len(images), 
+        interval=interval, blit=True
+    )
+    
+    # Save if path provided
+    if save_path:
+        anim.save(save_path, writer='pillow', fps=1000/interval)
+    
+    plt.show()
+    return anim
