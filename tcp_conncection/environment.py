@@ -3,7 +3,6 @@ import numpy as np
 import time
 import subprocess
 from pathlib import Path
-import struct
 
 fceux_dir = Path(__file__).parent.parent.parent
 fceux_path = fceux_dir/ "fceux64.exe"
@@ -13,17 +12,35 @@ lua_path = Path(__file__).parent / "tcp_server.lua"
 
 class FceuxEnv:
     """
-    This class provides an interface for commmunication between Python and Fceux's Lua frontend.
-
-    Main methods: 
-        reset(): 
-            - Reloads savestate #1
-            returns: 
-                state (a frame)
-        step(action: list[]):
-            - Sends the action to Lua and returns resulting percepts (frame, reward, terminated)
-            * action is a list containing states of all joypad buttons (either 1 or 0)
-                Convention: [LEFT RIGHT B A]
+    This class provides an interface for communication between Python and Fceux's Lua frontend.
+    
+    The interface automatically launches Fceux emulator, loads the specified ROM game,
+    and executes the companion Lua script for communication.
+    
+    Make sure the following global variables are configured above:
+        fceux_path (str): Path to the Fceux executable
+        rom_path (str): Path to the NES ROM file (.nes, .zip)
+        lua_path (str): Path to the companion Lua script
+    
+    Main methods:
+        reset():
+            Reloads savestate #1 to return the emulator to a known initial state.
+            
+            Returns:
+                state: A frame representing the current game screen after reset
+                
+        step(action):
+            Sends the specified action to Lua and returns the resulting percepts.
+            
+            Args:
+                action (numpy.array): An array containing states of all joypad buttons (either 1 or 0)
+                    Convention: [LEFT, RIGHT, B, A]
+                    
+            Returns:
+                tuple: A tuple containing:
+                    - frame: The current game frame after executing the action
+                    - reward: The reward value resulting from the action
+                    - terminated: Boolean indicating if the episode has ended
     """
 
     # signals for synchronized communication
@@ -121,10 +138,10 @@ class FceuxEnv:
 
         # 3. Request reward + terminated
         self.socket.sendall(self.DATA)
-        data = self.socket.recv(2)  # Receive 2 bytes
-        if len(data) >= 2:
-            reward = int(data[0])
-            terminated = bool(data[1])
+        data = self.socket.recv(32).strip().decode()
+        reward, terminated = data.split(':')
+        reward = float(reward)
+        terminated = (terminated=='1')
         
         return frame, reward, terminated
 

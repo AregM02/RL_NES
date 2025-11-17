@@ -4,7 +4,7 @@ from tcp_conncection.environment import FceuxEnv
 
 def main():
     # Variables for training/testing
-    episodes = 5  # total number of episodes
+    episodes = 1  # total number of episodes
     max_steps = 100  # maximum number of steps per episode
 
     # Q-learning algorithm hyperparameters to tune
@@ -35,7 +35,7 @@ def main():
             action = agent.get_action(state)
 
             # Take the action
-            next_state, reward, terminated = env.step(action)
+            next_state, reward, terminated = env.step()
 
             # Update knowledge
             agent.update(state, action, reward, terminated, next_state)
@@ -46,12 +46,13 @@ def main():
             total_reward += reward
             n_steps += 1
             episode_over = terminated
+            reward_history.append(reward)
 
         # reduce exploration rate
         agent.decay_epsilon()
 
         step_history.append(n_steps)
-        reward_history.append(total_reward)
+        # reward_history.append(total_reward)
 
     plt.plot(step_history)
     plt.xlabel('Episodes')

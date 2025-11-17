@@ -64,13 +64,37 @@ while true do
         emu.frameadvance()
         _, _ = client:receive("*l") -- wait for python to read the frame
     elseif signal == "data" then
-        -- game specific addresses, design as you need
-        local state = memory.readbyte(0x000E) -- get player state
-        local done = (state == 0x0B)          -- true if dying
+        -- Reward --
+        local reward
 
-        local reward = 100
+        local step_cost = -1                                    --small negative value for each step
 
-        client:send(string.char(reward, done and 1 or 0))
+        local dead = (memory.readbyte(0x000E) == 0x06)          -- player state == dead? negative reward
+        local level_cleared = (memory.readbyte(0x00FF) == 0x40) -- going down flagpole? positive reward
+
+        local speed = memory.readbyte(0x0057)
+
+        if speed >= 0xD8 and speed < 0xff then  -- moving left -> bad
+            reward = step_cost - 2
+        elseif speed > 0 and speed <= 0x28 then --moving right -> good
+            if speed > 0x18 then
+                reward = step_cost + 4          -- running right fast -> very good
+            else
+                reward = step_cost + 2
+            end
+        else -- standing -> meh
+            reward = step_cost
+        end
+
+        if level_cleared then
+            reward = reward + 1000
+        elseif dead then
+            reward = reward - 1000
+        end
+
+        local done = level_cleared or dead
+
+        client:send(tostring(reward) .. ":" .. (done and "1" or "0") .. "\n")
     else
         break
     end
