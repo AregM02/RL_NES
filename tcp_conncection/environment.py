@@ -3,9 +3,10 @@ import numpy as np
 import time
 import subprocess
 from pathlib import Path
+import cv2
 
 fceux_dir = Path(__file__).parent.parent.parent
-fceux_path = fceux_dir/ "fceux64.exe"
+fceux_path = fceux_dir/ "fceux.exe"
 rom_path = fceux_dir / "games" / "SuperMarioBros.zip"
 lua_path = Path(__file__).parent / "tcp_server.lua"
 
@@ -118,6 +119,26 @@ class FceuxEnv:
         return rgb
 
 
+    def _preprocess(self, frame):
+        # 1. Crop HUD
+        frame = frame[32:, :, :]  # (208, 256, 3)
+
+        # Manual weighted grayscale to boost red vs green
+        r = frame[:, :, 0].astype(np.float32)
+        # g = frame[:, :, 1].astype(np.float32)
+        # b = frame[:, :, 2].astype(np.float32)
+        frame = 0.85 * r
+
+        # 2. Resize to preserve
+        frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
+
+        # 3. Convert to float + normalize, but keep color
+        # frame = frame.astype(np.float32) / 255.0
+        frame = np.round(frame).astype(np.uint8)
+
+        return frame
+    
+
     def reset(self):
         self.socket.sendall(self.RESET)
         state, _, _ = self.step()
@@ -134,6 +155,7 @@ class FceuxEnv:
         # 2. Request frame
         self.socket.sendall(self.FRAME)
         frame = self._receive_frame()
+        frame = self._preprocess(frame)
         self.socket.sendall(self.DONE)
 
         # 3. Request reward + terminated

@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
 
-def animate_images(images, interval=100, save_path=None):
+def animate_images(images, interval=20, save_path=None):
     """
     Animate a list of images using FuncAnimation
     
