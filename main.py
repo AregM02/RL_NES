@@ -7,7 +7,7 @@ def main():
     # Create the agent and environment.
     # Make sure to keep the agent first, since PyTorch deadlocks sockets
     # during CUDA runtime initialization.
-    agent = Agent() 
+    agent = Agent(epsilon=0.2) 
     agent.load()
     env = FceuxEnv()
     
@@ -46,6 +46,7 @@ def main():
 
         step_history.append(n_steps)
         reward_history.append(total_reward)
+        agent.save()
 
     # animate_images(frames, interval = 2)
 
@@ -54,12 +55,12 @@ def main():
     # plt.ylabel('Number of Steps')
     # plt.show()
 
-    # plt.plot(reward_history)
-    # plt.xlabel('Episodes')
-    # plt.ylabel('Reward')
+    plt.plot(reward_history)
+    plt.xlabel('Episodes')
+    plt.ylabel('Reward')
+    plt.savefig("reward_hist.pdf", dpi = 300)
     # plt.show()
 
     env.close()
-    agent.save()
 
 main()

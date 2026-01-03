@@ -117,15 +117,22 @@ class Agent:
     
         if len(self.buffer) < self.batch_size:
             return
-        
-        print(minibatch[3].shape)
 
-        # # define targets
-        # y = torch.where(minibatch[-1],
-        #                 minibatch[2],
-        #                 minibatch[2] + self.gamma*torch.max(self.model(minibatch[3]), dim = )
-        #                 )
-        # error = torch.sum((y-))
+        # define targets
+        q_next = self.model(minibatch[3]) # (batch, len(INPUTS))
+        max_q_next = torch.max(q_next, dim=-1)[0]    
+        y = torch.where(minibatch[-1], # dones
+                        minibatch[2], # rewards if done
+                        minibatch[2] + self.gamma * max_q_next) # Q targets
+        
+        q_pred = self.model(minibatch[0])
+        q_pred = q_pred.gather(1, minibatch[1].long().unsqueeze(1)).squeeze(1)
+        loss = self.loss_fn(q_pred, y)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.decay_eps()
 
 
 class ReplayBuffer:
@@ -138,8 +145,8 @@ class ReplayBuffer:
         self.rewards = np.zeros(capacity, dtype=np.float32)
         self.dones = np.zeros(capacity, dtype=bool)
 
-        self.idx = 0 # next index to insert
-        self.size = 0 # current buffer size
+        self.idx = 0  # next index to insert
+        self.size = 0  # current buffer size
 
 
     def add(self, frame, action, reward, done):
@@ -155,38 +162,33 @@ class ReplayBuffer:
 
     def _valid_index(self, idx):
         """Check that idx can be used for stacking frames."""
-
-        start = idx - self.stack_size + 1
-
-        # need enough history
-        if start < 0:
+        if self.size < self.stack_size:
             return False
 
-        # do not cross episode boundary
-        if np.any(self.dones[start:idx]):
+        # Compute indices of the stack
+        indices = [(idx - offset) % self.capacity for offset in reversed(range(self.stack_size))]
+        
+        # Cannot cross episode boundaries
+        if np.any(self.dones[indices[:-1]]):
             return False
-
-        # do not cross circular buffer write head
-        if start < self.idx <= idx:
-            return False
-
+        
         return True
 
 
     def _get_stack(self, idx):
         """Return a stacked state s_t of shape (stack_size, H, W)."""
         assert self._valid_index(idx), f"Invalid index {idx} for stack"
-        return self.frames[idx - self.stack_size + 1:idx + 1]
+        indices = [(idx - offset) % self.capacity for offset in reversed(range(self.stack_size))]
+        return self.frames[indices]
 
 
     def sample(self, batch_size):
         """Sample a batch of transitions (s_t, a_t, r_t, s_{t+1}, done)."""
-        # Not enough frames yet
         if self.size < self.stack_size:
             return None
 
-        # Candidate indices
-        candidates = np.arange(self.stack_size - 1, self.size)
+        # Candidate indices: any index that could form a full stack
+        candidates = np.arange(self.size)  # full buffer
         mask = np.array([self._valid_index(i) for i in candidates])
         valid_indices = candidates[mask]
 
@@ -198,12 +200,12 @@ class ReplayBuffer:
 
         # Construct batches
         states = np.stack([self._get_stack(i) for i in idxs]).astype(np.float32) / 255.0
-        next_states = np.stack([self._get_stack(i + 1) for i in idxs]).astype(np.float32) / 255.0
+        next_states = np.stack([self._get_stack((i + 1) % self.capacity) for i in idxs]).astype(np.float32) / 255.0
         actions = self.actions[idxs]
         rewards = self.rewards[idxs]
         dones = self.dones[idxs]
 
-        # Convert to torch tensors
+        # Convert to torch tensors if desired
         states = torch.from_numpy(states).to(DEVICE)  # (batch, stack, H, W)
         next_states = torch.from_numpy(next_states).to(DEVICE)
         actions = torch.from_numpy(actions).to(DEVICE)
@@ -211,7 +213,6 @@ class ReplayBuffer:
         dones = torch.from_numpy(dones).to(DEVICE)
 
         return states, actions, rewards, next_states, dones
-
 
     def __len__(self):
         return self.size
