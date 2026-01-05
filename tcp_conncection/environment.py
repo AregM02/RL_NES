@@ -121,18 +121,18 @@ class FceuxEnv:
 
     def _preprocess(self, frame):
         # 1. Crop HUD
-        frame = frame[32:, :, :]  # (208, 256, 3)
+        frame = frame[64:, :, :]  # (208 - 32, 256, 3) 
 
         # Manual weighted grayscale to boost red vs green
         r = frame[:, :, 0].astype(np.float32)
-        # g = frame[:, :, 1].astype(np.float32)
-        # b = frame[:, :, 2].astype(np.float32)
-        frame = 0.85 * r
+        g = frame[:, :, 1].astype(np.float32)
+        b = frame[:, :, 2].astype(np.float32)
+        frame = 0.299*r+0.587*g+0.114*b
 
         # 2. Resize to preserve
         frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
 
-        # 3. Convert to float + normalize, but keep color
+        # 3. Convert to float
         # frame = frame.astype(np.float32) / 255.0
         frame = np.round(frame).astype(np.uint8)
 

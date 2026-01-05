@@ -1,106 +1,149 @@
 package.path = package.path .. ";./LuaSocket/?.lua"
 package.cpath = package.cpath .. ";./LuaSocket/?.dll"
 
+-- ================== UTIL ==================
 
--- +========= SOME USEFUL FUNCTIONS =============+
--- capture and send a frame
-function send_frame(client)
+local socket = require("socket")
+
+local function send_frame(client)
     local img_str = gui.gdscreenshot(true)
-    local raw = img_str:sub(12) -- Remove header
+    local raw = img_str:sub(12)
     client:send(raw)
 end
 
--- load level 1 (from state 1)
-function load_level_1()
-    local state = savestate.create(2)
+local function load_state(i)
+    local state = savestate.create(i+1)
     savestate.load(state)
 end
 
--- +=============================================+
+local function draw_joypad_gui(reward, total_reward)
+    local left_press = joypad.get(1)['left']
+    local right_press = joypad.get(1)['right']
+    local B_press = joypad.get(1)['B']
+    local A_press = joypad.get(1)['A']
+    local startX = 10
+    local startY = 10
+    local boxSize = 12
 
+    -- Helper function to draw a "Button"
+    local function drawButton(x, y, label, isPressed, activeColor)
+        local bgColor = isPressed and activeColor or "black"
+        local textColor = isPressed and "white" or "gray"
+        
+        -- Draw the button background
+        gui.drawbox(x, y, x + boxSize, y + boxSize, bgColor, "white")
+        -- Center the label (offset by ~3 pixels)
+        gui.text(x + 3, y + 2, label, textColor)
+    end
 
--- SERVER START
-local socket = require("socket")
+    -- Draw the Dashboard Background
+    gui.drawbox(startX - 5, startY - 5, startX + 100, startY + 45, "#00000080", "white")
 
--- NES screen size
-local width = 256
-local height = 240
+    -- Draw the Buttons
+    drawButton(startX,      startY + 15, "<-", left_press,  "red")
+    drawButton(startX + 15, startY + 15, "->", right_press, "red")
+    drawButton(startX + 40, startY + 15, "B", B_press,     "yellow")
+    drawButton(startX + 55, startY + 15, "A", A_press,     "green")
 
--- Create TCP server
+    -- Draw Reward Info next to it
+    gui.text(startX, startY, string.format("Reward: %.2f", reward), "white")
+    gui.text(startX, startY + 30, string.format("Total : %.2f", total_reward), "cyan")
+end
+
+-- ================= SERVER =================
 local server = assert(socket.bind("127.0.0.1", 5000))
 print(">> Lua TCP server listening on 127.0.0.1:5000")
 
--- Accept a client (Python)
 print(">> Waiting for Python connection...")
 local client = server:accept()
 client:settimeout(1)
 print(">> Python connected!")
 
+-- ================= GLOBAL STATES ================
+local max_x = 0
+local total_reward = 0
+local current_reward = 0
 
+-- ================= MAIN LOOP ====================
 while true do
-    local signal, _ = client:receive("*l")
-
+    local signal = client:receive("*l")
     if not signal then break end
 
+    -- -------- ACTION --------
     if signal == "action" then
-        local bool_data, _ = client:receive(4) -- read action (4 bytes)
-        local vals = {}
+        local bool_data = client:receive(4)
+        if not bool_data then break end
 
-        for i = 1, #bool_data do
-            local byte = string.byte(bool_data, i)
-            vals[i] = (byte == 1)
-        end
+        joypad.set(1, {
+            left  = string.byte(bool_data, 1) == 1,
+            right = string.byte(bool_data, 2) == 1,
+            B     = string.byte(bool_data, 3) == 1,
+            A     = string.byte(bool_data, 4) == 1
+        })
 
-        local input = {}
-        input["left"] = vals[1]
-        input["right"] = vals[2]
-        input["B"] = vals[3]
-        input["A"] = vals[4]
-        joypad.set(1, input)
+    -- -------- RESET --------
     elseif signal == "reset" then
-        load_level_1()
+        local state_ix = math.random(1, 5)
+        -- state_ix = 1
+        load_state(state_ix)
+        
+        -- Advance one frame to ensure memory addresses update to the new state
+        emu.frameadvance() 
+        
+        -- Read the new position from the save state
+        local screen_num = memory.readbyte(0x006D)
+        local x_in_screen = memory.readbyte(0x0086)
+        local current_x = (screen_num * 256) + x_in_screen
+        
+        -- Sync max_x so the baseline is 0 for this specific start
+        max_x = current_x 
+        total_reward = 0
+
+    -- -------- FRAME --------
     elseif signal == "frame" then
         send_frame(client)
-        emu.frameadvance()
-        _, _ = client:receive("*l") -- wait for python to read the frame
+        for i=1, 4 do -- Repeat the action for 4 frames
+            emu.frameadvance()
+            draw_joypad_gui(current_reward, total_reward)
+        end
+        client:receive("*l") -- Wait for Python ack
+
+    -- -------- DATA / REWARD --------
     elseif signal == "data" then
-        -- Reward --
-        local reward
+        local dead = (memory.readbyte(0x00FC) == 0x01)
+        local win  = (memory.readbyte(0x00FF) == 0x40)
+        local done = dead or win
 
-        local step_cost = -1                                    --small negative value for each step
+        local reward = -0.01 
 
-        local dead = (memory.readbyte(0x000E) == 0x06)          -- player state == dead? negative reward
-        local level_cleared = (memory.readbyte(0x00FF) == 0x40) -- going down flagpole? positive reward
+        local screen_num = memory.readbyte(0x006D)
+        local x_in_screen = memory.readbyte(0x0086)
+        local raw_x = (screen_num * 256) + x_in_screen -- correct formula for fceux!
 
-        local speed = memory.readbyte(0x0057)
-
-        if speed >= 0xD8 and speed < 0xff then  -- moving left -> bad
-            reward = step_cost - 2
-        elseif speed > 0 and speed <= 0x28 then --moving right -> good
-            if speed > 0x18 then
-                reward = step_cost + 4          -- running right fast -> very good
-            else
-                reward = step_cost + 2
-            end
-        else -- standing -> meh
-            reward = step_cost
+        -- Progress Reward
+        if raw_x > max_x then
+            local bonus = (raw_x - max_x) * 0.1 --forward progress
+            reward = reward + bonus
+            max_x = raw_x
+        elseif raw_x < max_x then
+            reward = reward - 0.1
         end
 
-        if level_cleared then
-            reward = reward + 1000
-        elseif dead then
-            reward = reward - 1000
-        end
+        if dead then reward = reward - 15.0 end
+        if win then reward = reward + 50.0 end
 
-        local done = level_cleared or dead
+        total_reward = total_reward + reward
+        current_reward = reward
 
+        -- Send result back to Python
         client:send(tostring(reward) .. ":" .. (done and "1" or "0") .. "\n")
+
     else
         break
     end
 end
 
--- Cleanup
+-- ================= CLEANUP ==================
 client:close()
 server:close()
 print(">> TCP server closed")
