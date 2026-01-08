@@ -1,9 +1,11 @@
 package.path = package.path .. ";./LuaSocket/?.lua"
 package.cpath = package.cpath .. ";./LuaSocket/?.dll"
+local socket = require("socket")
 
 -- ================== UTIL ==================
-
-local socket = require("socket")
+local function clear_input()
+    joypad.set(1, {left=false, right=false, A=false, B=false})
+end
 
 local function send_frame(client)
     local img_str = gui.gdscreenshot(true)
@@ -58,11 +60,14 @@ print(">> Waiting for Python connection...")
 local client = server:accept()
 client:settimeout(1)
 print(">> Python connected!")
+emu.speedmode("maximum")
 
 -- ================= GLOBAL STATES ================
 local max_x = 0
 local total_reward = 0
 local current_reward = 0
+local current_input = {} -- cache input too keep it persistent during frameskips
+local current_done = false -- cache the current DONE state for reset logic
 
 -- ================= MAIN LOOP ====================
 while true do
@@ -73,22 +78,31 @@ while true do
     if signal == "action" then
         local bool_data = client:receive(4)
         if not bool_data then break end
-
-        joypad.set(1, {
+        
+        current_input = {
             left  = string.byte(bool_data, 1) == 1,
             right = string.byte(bool_data, 2) == 1,
             B     = string.byte(bool_data, 3) == 1,
             A     = string.byte(bool_data, 4) == 1
-        })
+        }
+
+        joypad.set(1, current_input)
 
     -- -------- RESET --------
     elseif signal == "reset" then
         local state_ix = math.random(1, 5)
         -- state_ix = 1
         load_state(state_ix)
-        
-        -- Advance one frame to ensure memory addresses update to the new state
-        emu.frameadvance() 
+
+        -- Clear the input state as well as the cached input from previous states
+        clear_input()
+        current_input = {left=false, right=false, A=false, B=false}
+
+        -- Advance a few states to stabilize and also skip the loadstate text bubble
+        for i=1,300 do
+            clear_input()
+            emu.frameadvance()
+        end
         
         -- Read the new position from the save state
         local screen_num = memory.readbyte(0x006D)
@@ -98,15 +112,22 @@ while true do
         -- Sync max_x so the baseline is 0 for this specific start
         max_x = current_x 
         total_reward = 0
+        current_done = false
 
     -- -------- FRAME --------
     elseif signal == "frame" then
         send_frame(client)
-        for i=1, 4 do -- Repeat the action for 4 frames
+        for i=1, 4 do -- Repeat the action for 6 frames
+            if current_done then -- if died during these frames, disable input and quit
+                break
+            end
             emu.frameadvance()
+            joypad.set(1, current_input) --keep input constant when skipping frames
             draw_joypad_gui(current_reward, total_reward)
+            current_done = (memory.readbyte(0x00FC) == 0x01) or (memory.readbyte(0x00FF) == 0x40)
         end
         client:receive("*l") -- Wait for Python ack
+        if current_done then signal = "data" end -- if died flag is on, skip to the data routine to trigger a reset
 
     -- -------- DATA / REWARD --------
     elseif signal == "data" then
@@ -114,7 +135,7 @@ while true do
         local win  = (memory.readbyte(0x00FF) == 0x40)
         local done = dead or win
 
-        local reward = -0.01 
+        local reward = -0.1 
 
         local screen_num = memory.readbyte(0x006D)
         local x_in_screen = memory.readbyte(0x0086)
@@ -122,14 +143,14 @@ while true do
 
         -- Progress Reward
         if raw_x > max_x then
-            local bonus = (raw_x - max_x) * 0.1 --forward progress
+            local bonus = (raw_x - max_x) * 0.2 --forward progress
             reward = reward + bonus
             max_x = raw_x
         elseif raw_x < max_x then
-            reward = reward - 0.1
+            reward = reward - 0.5
         end
 
-        if dead then reward = reward - 15.0 end
+        if dead then reward = reward - 4.0 end
         if win then reward = reward + 50.0 end
 
         total_reward = total_reward + reward

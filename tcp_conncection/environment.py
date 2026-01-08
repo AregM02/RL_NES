@@ -3,7 +3,6 @@ import numpy as np
 import time
 import subprocess
 from pathlib import Path
-import cv2
 
 fceux_dir = Path(__file__).parent.parent.parent
 fceux_path = fceux_dir/ "fceux.exe"
@@ -120,22 +119,19 @@ class FceuxEnv:
 
 
     def _preprocess(self, frame):
-        # 1. Crop HUD
-        frame = frame[64:, :, :]  # (208 - 32, 256, 3) 
+        # Crop HUD
+        frame = frame[64:, :, :] 
 
-        # Manual weighted grayscale to boost red vs green
+        # Convert to grayscale
         r = frame[:, :, 0].astype(np.float32)
         g = frame[:, :, 1].astype(np.float32)
         b = frame[:, :, 2].astype(np.float32)
-        frame = 0.299*r+0.587*g+0.114*b
+        # frame = 0.299 * r + 0.587 * g + 0.114 * b
+        # frame = 0.299 * r 
+        frame = 0.5 * r + 0.3 * g + 0.2 * b
 
-        # 2. Resize to preserve
-        frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
-
-        # 3. Convert to float
-        # frame = frame.astype(np.float32) / 255.0
-        frame = np.round(frame).astype(np.uint8)
-
+        # Resize and dowsample
+        frame = self.downsample_block_mean(frame)
         return frame
     
 
@@ -176,3 +172,10 @@ class FceuxEnv:
             self.socket = None
         self.process.terminate()
         print(">> Connection closed!")
+
+
+    def downsample_block_mean(self, frame, factor=2):
+        # creates a less jittery observation than the (84, 84) area interpolation from cv2
+        H, W = frame.shape
+        frame = frame.reshape(H//factor, factor, W//factor, factor)
+        return frame.mean(axis=(1, 3)).astype(np.uint8)

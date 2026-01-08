@@ -3,60 +3,58 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from pathlib import Path
-from collections import deque
 from torchrl.data import ReplayBuffer, LazyTensorStorage
 from tensordict import TensorDict
 
-# torch.manual_seed(1234)
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-# possible inputs for the game
 INPUTS = (
-    (0, 0, 0, 0), (0, 0, 0, 1), (0, 0, 1, 0), (0, 0, 1, 1),
-    (0, 1, 0, 0), (0, 1, 0, 1), (0, 1, 1, 0), (0, 1, 1, 1),
-    (1, 0, 0, 0), (1, 0, 0, 1), (1, 0, 1, 0), (1, 0, 1, 1),
-    # (1, 1, 0, 0), (1, 1, 0, 1), (1, 1, 1, 0), (1, 1, 1, 1)
+    (0, 0, 0, 0),
+    (0, 1, 0, 0),
+    (0, 1, 0, 1),
+    (0, 1, 1, 0),
+    (0, 1, 1, 1),
+    (0, 0, 0, 1),
 )
-
 
 class Agent:
     def __init__(self, train=True, 
-                epsilon=1.0, epsilon_min=0.0001, epsilon_decay_rate = 0.9999,
+                epsilon=1.0, epsilon_min=0.01, epsilon_decay_rate = 0.99999,
                 gamma=0.99,
-                alpha=0.0001, alpha_decay=0.01,
-                batch_size=64
+                alpha=0.00025,
+                batch_size=64,
+                target_update_freq=1000, # sync every 1000 steps
+                stack_size = 4, buffer_size = 500000,
                 ):
         
-        self.frame_shape = (84,84)
-        self.stack_size = 4
-        self.buffer_size = 40000
-
-        self.epsilon = epsilon  # exploration probability
-        self.epsilon_decay_rate = epsilon_decay_rate # epsilon decay rate
-        self.epsilon_min = epsilon_min  # minimum value of epsilon
-        self.gamma = gamma  # discount
-        self.alpha = alpha  # learning rate
-        self.alpha_decay = alpha_decay  # learning rate decay
+        self.frame_shape = (88, 128)
+        self.stack_size = stack_size
+        self.buffer_size = buffer_size
+        self.epsilon = epsilon
+        self.epsilon_decay_rate = epsilon_decay_rate
+        self.epsilon_min = epsilon_min
+        self.gamma = gamma
+        self.alpha = alpha
         self.batch_size = batch_size
         self.train_mode = train
+        self.target_update_freq = target_update_freq
+        self.update_step = 0
 
-        # initialize replay buffer
         storage = LazyTensorStorage(max_size=self.buffer_size, device="cpu")
         self.buffer = ReplayBuffer(storage=storage, batch_size=self.batch_size)
         
+        # Build Online and Target Networks
         self.model = self.__build_model()
+        self.target_model = self.__build_model()
+        self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.eval() # target never trains via backprop
         
         if self.train_mode:
             self.model.train()
             self.optimizer = Adam(params=self.model.parameters(), lr = self.alpha)
-            self.loss_fn = nn.MSELoss()
+            self.loss_fn = nn.HuberLoss() # More robust to outliers than MSE
         else:
             self.model.eval()
-
-        # Set up observation window for inference
-        self.frame_stack = deque(maxlen=self.stack_size)
-        for _ in range(self.stack_size):
-            self.frame_stack.append(np.random.rand(*self.frame_shape))
 
 
     def __build_model(self):
@@ -68,47 +66,36 @@ class Agent:
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(7*7*64, 256),
+            nn.Linear(64 * 7 * 12, 512), # previously 7*7*64 for (88, 88)
             nn.ReLU(),
-            nn.Linear(256, len(INPUTS))
+            nn.Linear(512, len(INPUTS))
             ).to(DEVICE)
 
 
-    def remember(self, state, action, reward, done):
-        current_stack = np.stack(self.frame_stack) 
-        self.frame_stack.append(state)
-        next_stack = np.stack(self.frame_stack)
-
-        if self.train_mode:
-            # Store the 4-frame stacks in the buffer
-            data = TensorDict({
-                "state": torch.as_tensor(current_stack, dtype=torch.uint8),
-                "action": torch.as_tensor(action, dtype=torch.int8),
-                "reward": torch.as_tensor(reward),
-                "next_state": torch.as_tensor(next_stack, dtype=torch.uint8),
-                "done": torch.as_tensor(done, dtype=torch.bool)
-            }, batch_size=[])
-        
-            self.buffer.add(data)
+    def remember(self, state, action, reward, next_state, done):
+            # Store the ACTUAL stacks as they were seen
+            if self.train_mode:
+                data = TensorDict({
+                    "state": torch.as_tensor(state, dtype=torch.uint8),
+                    "action": torch.as_tensor(action, dtype=torch.int8),
+                    "reward": torch.as_tensor(reward, dtype=torch.float32),
+                    "next_state": torch.as_tensor(next_state, dtype=torch.uint8),
+                    "done": torch.as_tensor(done, dtype=torch.bool)
+                }, batch_size=[])
+                self.buffer.add(data)
 
 
-    def act(self):
-        # Perform epsilon greedy step
-        # EPLORE
+    def act(self, state_stack):
         if self.train_mode and np.random.rand() < self.epsilon:
-            
             action_idx = np.random.randint(0, len(INPUTS))
-
-        # EXPLOIT
         else:
             with torch.no_grad():
-                state = np.stack(self.frame_stack)
-                state_tensor = torch.from_numpy(state[None, :, :, :]).float().to(DEVICE)
+                state_tensor = torch.from_numpy(state_stack[None, :, :, :]).float().to(DEVICE) / 255.0
                 q_values = self.model(state_tensor)
                 action_idx = torch.argmax(q_values).item()
 
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay_rate
+        if self.train_mode:
+            self.epsilon = max(self.epsilon * self.epsilon_decay_rate, self.epsilon_min)
 
         return np.array(INPUTS[action_idx], dtype=np.int8), action_idx
     
@@ -121,20 +108,31 @@ class Agent:
         state = batch["state"].float() / 255.0
         next_state = batch["next_state"].float() / 255.0
 
-        q_next = self.model(next_state) 
-        max_q_next = torch.max(q_next, dim=-1)[0]    
-        
+        # --- DOUBLE DQN LOGIC ---
+        with torch.no_grad():
+            # 1. Online model selects the best action
+            next_q_online = self.model(next_state)
+            best_next_actions = torch.argmax(next_q_online, dim=1, keepdim=True)
+            
+            # 2. Target model evaluates that action
+            next_q_target = self.target_model(next_state)
+            max_q_next = next_q_target.gather(1, best_next_actions).squeeze(1)
+
         y = torch.where(batch["done"], 
                         batch["reward"], 
                         batch["reward"] + self.gamma * max_q_next)
         
-        q_pred = self.model(state)
-        q_pred = q_pred.gather(1, batch["action"].long().unsqueeze(1)).squeeze(1)
+        q_pred = self.model(state).gather(1, batch["action"].long().unsqueeze(1)).squeeze(1)
         loss = self.loss_fn(q_pred, y)
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+        # Update Target Network
+        self.update_step += 1
+        if self.update_step % self.target_update_freq == 0:
+            self.target_model.load_state_dict(self.model.state_dict())
 
 
     def save(self, fname = 'model'):
