@@ -68,6 +68,8 @@ local total_reward = 0
 local current_reward = 0
 local current_input = {} -- cache input too keep it persistent during frameskips
 local current_done = false -- cache the current DONE state for reset logic
+local load_randomy = false
+local last_A = false -- Track the A-button state between actions
 
 -- ================= MAIN LOOP ====================
 while true do
@@ -79,24 +81,39 @@ while true do
         local bool_data = client:receive(4)
         if not bool_data then break end
         
+        local next_A = string.byte(bool_data, 4) == 1
+
         current_input = {
             left  = string.byte(bool_data, 1) == 1,
             right = string.byte(bool_data, 2) == 1,
             B     = string.byte(bool_data, 3) == 1,
-            A     = string.byte(bool_data, 4) == 1
+            A     = next_A
         }
 
+        -- RESET PULSE: Reset A only if on ground (0x00) and repeating a jump command
+        -- This allows holding A in mid-air (0x01) for maximum jump height.
+        local player_state = memory.readbyte(0x001D) -- 0x00 is standing on solid ground
+        if next_A and last_A and player_state == 0 then
+            joypad.set(1, {left=current_input.left, right=current_input.right, B=current_input.B, A=false})
+            emu.frameadvance()
+        end
+
         joypad.set(1, current_input)
+        last_A = next_A -- Update state for the next action signal
 
     -- -------- RESET --------
     elseif signal == "reset" then
-        local state_ix = math.random(1, 5)
-        -- state_ix = 1
+        if load_randomly then
+            local state_ix = math.random(1, 5)
+        else
+            state_ix = 1
+        end
         load_state(state_ix)
 
         -- Clear the input state as well as the cached input from previous states
         clear_input()
         current_input = {left=false, right=false, A=false, B=false}
+        last_A = false -- Reset jump tracking on death/reload
 
         -- Advance a few states to stabilize and also skip the loadstate text bubble
         for i=1,300 do
@@ -117,7 +134,7 @@ while true do
     -- -------- FRAME --------
     elseif signal == "frame" then
         send_frame(client)
-        for i=1, 4 do -- Repeat the action for 6 frames
+        for i=1, 4 do -- Repeat the action for 4 frames
             if current_done then -- if died during these frames, disable input and quit
                 break
             end
@@ -135,18 +152,18 @@ while true do
         local win  = (memory.readbyte(0x00FF) == 0x40)
         local done = dead or win
 
-        local reward = -0.1 
+        local reward = -0.1
 
         local screen_num = memory.readbyte(0x006D)
         local x_in_screen = memory.readbyte(0x0086)
-        local raw_x = (screen_num * 256) + x_in_screen -- correct formula for fceux!
+        local raw_x = (screen_num * 256) + x_in_screen
 
         -- Progress Reward
         if raw_x > max_x then
-            local bonus = (raw_x - max_x) * 0.2 --forward progress
+            local bonus = (raw_x - max_x) * 0.1
             reward = reward + bonus
             max_x = raw_x
-        elseif raw_x < max_x then
+        elseif raw_x <= max_x then
             reward = reward - 0.5
         end
 

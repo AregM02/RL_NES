@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from pathlib import Path
-from torchrl.data import ReplayBuffer, LazyTensorStorage
+from torchrl.data import ReplayBuffer, LazyTensorStorage, PrioritizedSampler
 from tensordict import TensorDict
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -22,7 +22,7 @@ class Agent:
                 epsilon=1.0, epsilon_min=0.01, epsilon_decay_rate = 0.99999,
                 gamma=0.99,
                 alpha=0.00025,
-                batch_size=64,
+                batch_size=256,
                 target_update_freq=1000, # sync every 1000 steps
                 stack_size = 4, buffer_size = 500000,
                 ):
@@ -40,8 +40,9 @@ class Agent:
         self.target_update_freq = target_update_freq
         self.update_step = 0
 
-        storage = LazyTensorStorage(max_size=self.buffer_size, device="cpu")
-        self.buffer = ReplayBuffer(storage=storage, batch_size=self.batch_size)
+        self.buffer = ReplayBuffer(storage=LazyTensorStorage(max_size=self.buffer_size, device="cpu"),
+                                   sampler=PrioritizedSampler(max_capacity=self.buffer_size, alpha=0.6, beta=0.4),
+                                   batch_size=self.batch_size)
         
         # Build Online and Target Networks
         self.model = self.__build_model()
@@ -88,6 +89,7 @@ class Agent:
     def act(self, state_stack):
         if self.train_mode and np.random.rand() < self.epsilon:
             action_idx = np.random.randint(0, len(INPUTS))
+            print(action_idx)
         else:
             with torch.no_grad():
                 state_tensor = torch.from_numpy(state_stack[None, :, :, :]).float().to(DEVICE) / 255.0
@@ -104,7 +106,8 @@ class Agent:
         if not self.train_mode or len(self.buffer) < self.batch_size:
                 return
             
-        batch = self.buffer.sample().to(DEVICE)
+        batch, info = self.buffer.sample(return_info=True)
+        batch = batch.to(DEVICE)
         state = batch["state"].float() / 255.0
         next_state = batch["next_state"].float() / 255.0
 
@@ -123,8 +126,13 @@ class Agent:
                         batch["reward"] + self.gamma * max_q_next)
         
         q_pred = self.model(state).gather(1, batch["action"].long().unsqueeze(1)).squeeze(1)
-        loss = self.loss_fn(q_pred, y)
 
+        # update sampler priority of the buffer
+        td_error = torch.abs(y - q_pred).detach()
+        self.buffer.update_priority(info["index"], td_error)
+
+        # standard backprop
+        loss = self.loss_fn(q_pred, y)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -135,16 +143,24 @@ class Agent:
             self.target_model.load_state_dict(self.model.state_dict())
 
 
-    def save(self, fname = 'model'):
-        file = Path(__file__).parent / 'saved_models' / f'{fname}.pt'
-
-        print(f"Saving model to: {file}")
-        torch.save(self.model.state_dict(), file)
-
-
-    def load(self, fname = 'model'):
+    def save(self, fname = 'checkpoint'):
         file = Path(__file__).parent / 'saved_models' / f'{fname}.pt'
         
+        print(f"Saving checkpoint to: {file}")
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, file)
+
+
+    def load(self, fname = 'checkpoint'):
+        file = Path(__file__).parent / 'saved_models' / f'{fname}.pt'
+
         if file.exists():
-            print(f"Loading model state dict from: {file}")
-            self.model.load_state_dict(torch.load(file))
+            checkpoint = torch.load(file)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            if self.train_mode:
+                self.target_model.load_state_dict(self.model.state_dict())
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict']) # kinda necessary
+            print(f"Loaded previous checkpoint from: {file}")

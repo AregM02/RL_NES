@@ -1,23 +1,25 @@
-import time
 import numpy as np
 from collections import deque
 import matplotlib.pyplot as plt
+from sympy import false
 from agents import Agent
 from tcp_conncection.environment import FceuxEnv
 from utils import animate_images
 
 
 def main():
-    N_episodes = 500
-    max_steps = 10000
+    train = False
+    N_episodes = 2000
+    max_steps = 2000
     skip_steps_train = 4
     stack_size = 4
     reward_history = []
     # frames = []
 
     # Create the agent and environment.
-    # Make sure to keep the agent first, since PyTorch deadlocks sockets during CUDA runtime initialization.
-    agent = Agent(train=True, stack_size=stack_size, epsilon=0.18289766427883497)
+    # Make sure to keep the agent first, since PyTorch 
+    # deadlocks sockets during CUDA runtime initialization.
+    agent = Agent(train=train, stack_size=stack_size, epsilon=0.008, epsilon_min=0.005)
     agent.load()
     env = FceuxEnv()
     
@@ -54,7 +56,8 @@ def main():
             # frames.append(state)
 
         print(f"Total reward for the episode: {total_reward}. Current eps: {agent.epsilon}")
-        agent.save()
+        if train:
+            agent.save()
 
     # animate_images(frames)
     # plt.plot(reward_history)
